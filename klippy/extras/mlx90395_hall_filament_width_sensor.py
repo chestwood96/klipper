@@ -32,10 +32,10 @@ class MLX90395HallFilamentWidthSensor:
         self.runout_dia=config.getfloat('min_diameter', 1.0)
         self.is_log =config.getboolean('logging', False)
         self.averaging =config.getint('averaging', 1)
+        self.poll_time =config.getfloat('poll_time', 1)
         # Use the current diameter instead of nominal while the first
         # measurement isn't in place
-        self.use_current_dia_while_delay = config.getboolean(
-            'use_current_dia_while_delay', False)
+        self.use_current_dia_while_delay = config.getboolean('use_current_dia_while_delay', False)
         # filament array [position, filamentWidth]
         self.filament_array = []
         self.lastFilamentWidthReading = 0
@@ -62,7 +62,11 @@ class MLX90395HallFilamentWidthSensor:
         self.gcode.register_command('ENABLE_FILAMENT_WIDTH_LOG', self.cmd_log_enable)
         self.gcode.register_command('DISABLE_FILAMENT_WIDTH_LOG', self.cmd_log_disable)
 
-        self.runout_helper = filament_switch_sensor.RunoutHelper(config)
+        self.last_epos = 0 # todo remove?
+
+        self.runout_helper = filament_switch_sensor.RunoutHelper(config)        
+        #logging.info(f"DERP2 {config.get_name().split()[1]}")
+
     # Initialization
     def handle_connect(self):
         self._init_sensor()
@@ -70,6 +74,7 @@ class MLX90395HallFilamentWidthSensor:
     def handle_ready(self):
         # Load printer objects
         self.toolhead = self.printer.lookup_object('toolhead')
+        self.motion_report = self.printer.lookup_object("motion_report")
 
         # Start extrude factor update timer
         self.reactor.update_timer(self.extrude_factor_update_timer, self.reactor.NOW)
@@ -97,9 +102,13 @@ class MLX90395HallFilamentWidthSensor:
 
     def extrude_factor_update_event(self, eventtime):
         self.diameter = self.read_diameter()
-        logging.info(f"DERP {self.diameter}")
+        #logging.info(f"DERP {self.diameter}")        
         # Update extrude factor
         pos = self.toolhead.get_position()
+        current_epos = self.motion_report.get_status(eventtime)['live_position'].e
+        if self.last_epos != current_epos:
+            logging.info(f"Filament diameter, {pos[3]},{current_epos},{self.diameter}")
+        self.last_epos = current_epos
         last_epos = pos[3]
         # Update filament array for lastFilamentWidthReading
         self.update_filament_array(last_epos)
@@ -134,7 +143,7 @@ class MLX90395HallFilamentWidthSensor:
             self.filament_array = []
 
         if self.is_active:
-            return eventtime + 1
+            return eventtime + self.poll_time
         else:
             return self.reactor.NEVER
 
@@ -215,7 +224,8 @@ class MLX90395HallFilamentWidthSensor:
         accumulator = 0
         for x in range(self.averaging):
             answer = self.read_register(0x80 >> 1, 12)
-            while(answer[0] & 0x01 > 0): # Retry if data isn't fresh
+            while(answer[0] & 0x01 < 1): # Retry if data isn't fresh
+                self.reactor.pause(self.reactor.monotonic() + .01)
                 answer = self.read_register(0x80 >> 1, 12)
             accumulator += int.from_bytes([answer[6], answer[7]], "big", signed=True) # TODO configurable axis
         value = int(accumulator / self.averaging)
@@ -250,5 +260,5 @@ class MLX90395HallFilamentWidthSensor:
         command.insert(0, 0x80)
         self.i2c.i2c_write(command)
 
-def load_config(config):
+def load_config_prefix(config):
     return MLX90395HallFilamentWidthSensor(config)
